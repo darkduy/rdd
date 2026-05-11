@@ -19,6 +19,13 @@ const usageMsg = `[*] USAGE: ${basePath}?channel=<CHANNEL_NAME>&binaryType=<BINA
 
 const hostPath = "https://setup-aws.rbxcdn.com"; // Only the AWS mirror has proper CORS cfg
 
+// CORS proxies to try in order when fetching clientsettings (which blocks direct browser requests)
+const corsProxies = [
+    url => `https://corsproxy.io/?${encodeURIComponent(url)}`,
+    url => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
+    url => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`,
+];
+
 // Root extract locations for the Win manifests
 const extractRoots = {
     player: {
@@ -99,34 +106,34 @@ const extractRoots = {
 
 const binaryTypes = {
     WindowsPlayer: {
-        //versionFile: "/version",
+        clientSettingsName: "WindowsPlayer",
         blobDirs: {
-          "x86-64": "/"
+            "x86-64": "/"
         }
     },
     WindowsStudio64: {
-        //versionFile: "/versionQTStudio",
+        clientSettingsName: "WindowsStudio64",
         blobDirs: {
-          "x86-64": "/"
+            "x86-64": "/"
         }
     },
     MacPlayer: {
-        //versionFile: "/mac/version",
+        clientSettingsName: "MacPlayer",
         defaultArch: "arm64",
         blobDirs: {
-          "arm64": "/mac/arm64/",
-          "x86-64": "/mac/"
+            "arm64": "/mac/arm64/",
+            "x86-64": "/mac/"
         }
     },
     MacStudio: {
-        //versionFile: "/mac/versionStudio",
+        clientSettingsName: "MacStudio",
         defaultArch: "arm64",
         blobDirs: {
-          "arm64": "/mac/arm64/",
-          "x86-64": "/mac/"
+            "arm64": "/mac/arm64/",
+            "x86-64": "/mac/"
         }
     },
-}
+};
 
 const urlParams = new URLSearchParams(window.location.search);
 
@@ -139,7 +146,7 @@ const binaryTypeSelect = document.getElementById("binaryType");
 function populateArchSelect(binaryTypeName) {
     archSelect.innerHTML = "";
     const binaryTypeObject = binaryTypes[binaryTypeName];
-    if (! binaryTypeObject) {
+    if (!binaryTypeObject) {
         return;
     }
 
@@ -154,9 +161,9 @@ function populateArchSelect(binaryTypeName) {
     if (binaryTypeObject.defaultArch) {
         archSelect.value = binaryTypeObject.defaultArch;
     }
-};
+}
 
-binaryTypeSelect.addEventListener("change", function() {
+binaryTypeSelect.addEventListener("change", function () {
     populateArchSelect(binaryTypeSelect.value);
 });
 
@@ -184,21 +191,21 @@ function getPermLink() {
     }
 
     return basePath + queryString;
-};
+}
 
 function downloadFromForm() {
     window.open(getPermLink(), "_self");
-};
+}
 
 function copyPermLink() {
     navigator.clipboard.writeText(getPermLink());
-};
+}
 
 function scrollToBottom() {
     window.scrollTo({
         top: document.body.scrollHeight
     });
-};
+}
 
 function escHtml(originalText) {
     return originalText
@@ -209,14 +216,14 @@ function escHtml(originalText) {
         .replace(/'/g, "&#039;")
         .replace(/ /g, "&nbsp;")
         .replace(/\n/g, "<br>");
-};
+}
 
 function log(msg = "", end = "\n", autoScroll = true) {
     consoleText.append(msg + end);
     if (autoScroll) {
         scrollToBottom();
     }
-};
+}
 
 // Prompt download
 function downloadBinaryFile(fileName, data, mimeType = "application/zip") {
@@ -234,7 +241,7 @@ function downloadBinaryFile(fileName, data, mimeType = "application/zip") {
     scrollToBottom();
 
     button.click();
-};
+}
 
 function requestBinary(url, callback) {
     const httpRequest = new XMLHttpRequest();
@@ -242,9 +249,7 @@ function requestBinary(url, callback) {
     httpRequest.open("GET", url, true);
     httpRequest.responseType = "arraybuffer";
 
-    // When the request is done later..
-    httpRequest.onload = function() {
-        // Handle req issues, and don't call-back
+    httpRequest.onload = function () {
         const statusCode = httpRequest.status;
         if (statusCode != 200) {
             log(`[!] Binary request error (${statusCode}) @ ${url}`);
@@ -252,7 +257,7 @@ function requestBinary(url, callback) {
         }
 
         const arrayBuffer = httpRequest.response;
-        if (! arrayBuffer) {
+        if (!arrayBuffer) {
             log(`[!] Binary request error (${statusCode}) @ ${url} - Failed to get binary ArrayBuffer from response`);
             return;
         }
@@ -260,20 +265,55 @@ function requestBinary(url, callback) {
         callback(arrayBuffer, statusCode);
     };
 
-    httpRequest.onerror = function(e) {
+    httpRequest.onerror = function (e) {
         log(`[!] Binary request error @ ${url} - ${e}`);
     };
 
     httpRequest.send();
-};
+}
 
 function getQuery(queryString) {
-    if (! urlParams.has(queryString)) {
+    if (!urlParams.has(queryString)) {
         return null;
     }
-
     return urlParams.get(queryString) || null;
-};
+}
+
+// ---------------------------------------------------------------------------
+// Auto-fetch version from clientsettings.roblox.com via CORS proxies
+// Tries each proxy in order; resolves with the version string or rejects.
+// ---------------------------------------------------------------------------
+async function fetchVersionAuto(binaryTypeName, channelName) {
+    const apiUrl = `https://clientsettings.roblox.com/v2/client-version/${binaryTypeName}/channel/${channelName}`;
+
+    for (let i = 0; i < corsProxies.length; i++) {
+        const proxyUrl = corsProxies[i](apiUrl);
+        log(`[*] Trying CORS proxy ${i + 1}/${corsProxies.length} to auto-fetch version..`);
+        try {
+            const resp = await fetch(proxyUrl, { signal: AbortSignal.timeout(8000) });
+            if (!resp.ok) {
+                log(`[!] Proxy ${i + 1} returned HTTP ${resp.status}, trying next..`);
+                continue;
+            }
+
+            const json = await resp.json();
+            // Response shape: { "version": "version-xxxxxxxxxxxxxxxx", "clientVersionUpload": "...", ... }
+            const ver = json.version || json.clientVersionUpload;
+            if (ver && ver.startsWith("version-")) {
+                log(`[+] Auto-detected version: ${ver}`);
+                return ver;
+            }
+
+            log(`[!] Proxy ${i + 1} response missing version field, trying next..`);
+        } catch (err) {
+            log(`[!] Proxy ${i + 1} failed: ${err.message || err}, trying next..`);
+        }
+    }
+
+    throw new Error("All CORS proxies failed to fetch the version automatically.");
+}
+
+// ---------------------------------------------------------------------------
 
 let channel = getQuery("channel");
 let version = getQuery("version") || getQuery("guid");
@@ -292,15 +332,14 @@ let zip;
 
 main();
 
-function main() {
+async function main() {
     if (window.location.search === "") {
         downloadFormDiv.hidden = false;
         log(usageMsg, "\n", false);
         return;
     }
 
-    // Query params
-
+    // --- Channel ---
     if (channel !== null) {
         if (channel !== "LIVE") {
             channel = channel.toLowerCase();
@@ -315,20 +354,22 @@ function main() {
         channelPath = `${hostPath}/channel/${channel}`;
     }
 
+    // --- Version normalisation ---
     if (version !== null) {
         version = version.toLowerCase();
-        if (! version.startsWith("version-")) { // Only the version GUID is actually necessary
+        if (!version.startsWith("version-")) {
             version = "version-" + version;
         }
     }
 
-    // We're also checking to make sure blobDir hasn't been included too for the compatibility warning later
-    if (version && ! binaryType) {
+    // Compatibility guard: version without binaryType
+    if (version && !binaryType) {
         log("[!] Error: If you provide a specific `version`, you need to set the `binaryType` aswell! See the usage doc below for examples of various `binaryType` inputs:", "\n\n");
         log(usageMsg, "\n", false);
         return;
     }
 
+    // --- blobDir override ---
     if (blobDir !== null && blobDir !== "") {
         if (blobDir.slice(0) !== "/") {
             blobDir = "/" + blobDir;
@@ -338,16 +379,17 @@ function main() {
         }
     }
 
+    // --- compressZip ---
     if (compressZip !== null) {
         if (compressZip !== "true" && compressZip !== "false") {
             log(`[!] Error: The \`compressZip\` query must be "true" or "false", got "${compressZip}"`);
         }
-
-        compressZip = (compressZip === "true");
+        compressZip = compressZip === "true";
     } else {
         compressZip = downloadForm.compressZip.checked;
     }
 
+    // --- compressionLevel ---
     if (compressionLevel !== null) {
         try {
             compressionLevel = parseInt(compressionLevel);
@@ -363,12 +405,12 @@ function main() {
             return;
         }
     } else {
-        compressionLevel = downloadForm.compressionLevel.value; // Only applies to when `compressZip` is true aswell
+        compressionLevel = downloadForm.compressionLevel.value;
     }
 
-    // At this point, we expect `binaryType` to be defined
-    if (! binaryType) {
-        log("[!] Error: Missing required \`binaryType\` query, are you using an old perm link for a specific version?", "\n\n");
+    // --- binaryType required from here ---
+    if (!binaryType) {
+        log("[!] Error: Missing required `binaryType` query, are you using an old perm link for a specific version?", "\n\n");
         log(usageMsg, "\n", false);
         return;
     }
@@ -376,12 +418,11 @@ function main() {
     if (binaryType in binaryTypes) {
         const binaryTypeObject = binaryTypes[binaryType];
 
-        if (! arch) {
+        if (!arch) {
             arch = binaryTypeObject.defaultArch || Object.keys(binaryTypeObject.blobDirs)[0];
         }
 
-        // If `blobDir` has already been defined by the user, we don't want to override it here
-        if (! blobDir) {
+        if (!blobDir) {
             blobDir = binaryTypeObject.blobDirs[arch];
         }
     } else {
@@ -390,60 +431,69 @@ function main() {
         return;
     }
 
-    if (version) {
-        fetchManifest();
-    } else {
-        const binaryTypeEncoded = escHtml(binaryType);
-        const channelNameEncoded = escHtml(channel);
+    // --- Auto-fetch version if not provided ---
+    if (!version) {
+        const binaryTypeObject = binaryTypes[binaryType];
+        const clientSettingsName = binaryTypeObject.clientSettingsName || binaryType;
+        const channelNameForApi = channel === "LIVE" ? "LIVE" : channel;
 
-        const clientSettingsUrl = `https://clientsettings.roblox.com/v2/client-version/${binaryTypeEncoded}/channel/${channelNameEncoded}`;
-        log("Copy the version hash (the area with \"version-xxxxxxxxxxxxxxxx\" in double-quotes) from the page in the link below (we can't because of CORS), and paste it in the field named \"Version Hash\" in the form above\n");
-        consoleText.innerHTML += `<a target="_blank" href="${clientSettingsUrl}">${clientSettingsUrl}</a><br><br><br>`;
+        log(`[*] No version specified — attempting to auto-detect latest version for ${binaryType}@${channel}..`);
 
-        // Same options as may have been input from the page before
-        downloadForm.channel.value = channelNameEncoded;
-        downloadForm.binaryType.value = binaryTypeEncoded;
-        populateArchSelect(binaryType);
-        archSelect.value = arch;
-        downloadForm.compressZip.checked = compressZip;
-        downloadForm.compressionLevel.value = compressionLevel;
+        try {
+            version = await fetchVersionAuto(clientSettingsName, channelNameForApi);
+        } catch (err) {
+            // All proxies failed — fall back to the manual form
+            log(`[!] Auto-detection failed: ${err.message}`);
+            log(`[*] Falling back to manual mode. Copy the version hash from the link below and paste it into the "Version Hash" field, then click Download.\n`);
 
-        downloadFormDiv.hidden = false;
+            const clientSettingsUrl = `https://clientsettings.roblox.com/v2/client-version/${escHtml(clientSettingsName)}/channel/${escHtml(channelNameForApi)}`;
+            consoleText.innerHTML += `<a target="_blank" href="${clientSettingsUrl}">${clientSettingsUrl}</a><br><br><br>`;
 
-        return;
+            downloadForm.channel.value = channel;
+            downloadForm.binaryType.value = binaryType;
+            populateArchSelect(binaryType);
+            archSelect.value = arch;
+            downloadForm.compressZip.checked = compressZip;
+            downloadForm.compressionLevel.value = compressionLevel;
+
+            downloadFormDiv.hidden = false;
+            return;
+        }
     }
-};
+
+    fetchManifest();
+}
 
 async function fetchManifest() {
     versionPath = `${channelPath}${blobDir}${version}-`;
 
     if (binaryType === "MacPlayer" || binaryType === "MacStudio") {
-        const zipFileName = (binaryType == "MacPlayer" && "RobloxPlayer.zip") || (binaryType == "MacStudio" && "RobloxStudioApp.zip");
+        const zipFileName = (binaryType === "MacPlayer" && "RobloxPlayer.zip") || (binaryType === "MacStudio" && "RobloxStudioApp.zip");
         log(`[+] Fetching zip archive for BinaryType "${binaryType}" (${zipFileName})`);
 
         const outputFileName = `${channel}-${binaryType}-${version}.zip`;
         log(`[+] (Please wait!) Downloading ${outputFileName}..`, "");
 
-        requestBinary(versionPath + zipFileName, function(zipData) {
+        requestBinary(versionPath + zipFileName, function (zipData) {
             log("done!");
             downloadBinaryFile(outputFileName, zipData);
         });
     } else {
-        // Now, we're only dealing with Windows bin logic
+        // Windows binary logic
         log(`[+] Fetching rbxPkgManifest for ${version}@${channel}..`);
 
-        // TODO: This is terrible, just a temp fix so we don't get 5 billion issue reports for not supporting /channel/common/
         var manifestBody = "";
         {
             var resp = await fetch(versionPath + "rbxPkgManifest.txt");
-            if (! resp.ok) {
+            if (!resp.ok) {
+                // Fallback to /channel/common/
                 channelPath = `${hostPath}/channel/common`;
                 versionPath = `${channelPath}${blobDir}${version}-`;
 
                 resp = await fetch(versionPath + "rbxPkgManifest.txt");
             }
 
-            if (! resp.ok) {
+            if (!resp.ok) {
                 log(`[!] Failed to fetch rbxPkgManifest: (status: ${resp.status}, err: ${(await resp.text()) || "<failed to get response from server>"})`);
                 return;
             }
@@ -453,7 +503,7 @@ async function fetchManifest() {
 
         downloadZipsFromManifest(manifestBody);
     }
-};
+}
 
 async function downloadZipsFromManifest(manifestBody) {
     const pkgManifestLines = manifestBody.split("\n").map(line => line.trim());
@@ -486,7 +536,7 @@ async function downloadZipsFromManifest(manifestBody) {
 
     zip = new JSZip();
 
-    // For both WindowsPlayer and WindowsStudio64
+    // AppSettings.xml required for both Player and Studio
     zip.file("AppSettings.xml", `<?xml version="1.0" encoding="UTF-8"?>
 <Settings>
 \t<ContentFolder>content</ContentFolder>
@@ -498,16 +548,15 @@ async function downloadZipsFromManifest(manifestBody) {
 
     function doneCallback() {
         threadsLeft -= 1;
-    };
+    }
 
     function getThreadsLeft() {
         return threadsLeft - 1;
-    };
+    }
 
     for (const index in pkgManifestLines) {
         const pkgManifestLine = pkgManifestLines[index];
-        if (! pkgManifestLine.endsWith(".zip")) {
-            // Not a package in the manifest. Should I be using the checksum? Yes.. I'll do it later. Maybe.
+        if (!pkgManifestLine.endsWith(".zip")) {
             continue;
         }
 
@@ -521,7 +570,6 @@ async function downloadZipsFromManifest(manifestBody) {
             return;
         }
 
-        // Now, we can export and download the complete zip
         const outputFileName = `${channel}-${binaryType}-${version}.zip`;
         log();
         if (compressZip) {
@@ -536,22 +584,22 @@ async function downloadZipsFromManifest(manifestBody) {
             compressionOptions: {
                 level: compressionLevel
             }
-        }).then(function(outputZipData) {
+        }).then(function (outputZipData) {
             zip = null;
             log("done!");
             downloadBinaryFile(outputFileName, outputZipData);
         });
-    };
+    }
 
     checkIfNoThreadsLeft();
-};
+}
 
 async function downloadPackage(packageName, doneCallback, getThreadsLeft) {
     log(`[+] Fetching "${packageName}"..`);
     const blobUrl = versionPath + packageName;
 
-    requestBinary(blobUrl, async function(blobData) {
-        if (packageName in binExtractRoots == false) {
+    requestBinary(blobUrl, async function (blobData) {
+        if (packageName in binExtractRoots === false) {
             log(`[*] Package name "${packageName}" not defined in extraction roots for BinaryType \`${binaryType}\`, skipping extraction! (THIS MAY MAKE THE ZIP OUTPUT INCOMPLETE, BE AWARE!)`);
             zip.file(packageName, blobData);
             log(`[+] Moved package "${packageName}" directly to the root folder`);
@@ -562,18 +610,17 @@ async function downloadPackage(packageName, doneCallback, getThreadsLeft) {
         log(`[+] Extracting "${packageName}"..`);
         const extractRootFolder = binExtractRoots[packageName];
 
-        await JSZip.loadAsync(blobData).then(async function(packageZip) {
+        await JSZip.loadAsync(blobData).then(async function (packageZip) {
             blobData = null;
             let fileGetPromises = [];
 
-            packageZip.forEach(function(path, object) {
+            packageZip.forEach(function (path, object) {
                 if (path.endsWith("\\")) {
-                    // If it's a directory, skip
-                    return;
+                    return; // skip directories
                 }
 
                 const fixedPath = path.replace(/\\/g, "/");
-                const fileGetPromise = object.async("arraybuffer").then(function(data) {
+                const fileGetPromise = object.async("arraybuffer").then(function (data) {
                     zip.file(extractRootFolder + fixedPath, data);
                 });
 
@@ -587,4 +634,4 @@ async function downloadPackage(packageName, doneCallback, getThreadsLeft) {
         log(`[+] Extracted "${packageName}"! (Packages left: ${getThreadsLeft()})`);
         doneCallback();
     });
-};
+}
